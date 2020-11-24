@@ -19,6 +19,8 @@ package controllers
 import (
 	"context"
 	"fmt"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	"os"
 	"strings"
 	"time"
@@ -39,8 +41,9 @@ import (
 // CassandraDatacenterReconciler reconciles a CassandraDatacenter object
 type CassandraDatacenterReconciler struct {
 	client.Client
-	Log    logr.Logger
-	Scheme *runtime.Scheme
+	Log      logr.Logger
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 const (
@@ -101,9 +104,11 @@ func (r *CassandraDatacenterReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 			if errors.IsNotFound(err) {
 				// It is possible that the Reaper has not been deployed yet or that it has
 				// been deleted, or the annotation could specify an incorrect value.
+				r.Recorder.Event(reaperInstance, corev1.EventTypeNormal, "Find", fmt.Sprintf("No reaper instance: %v found", reaperKey))
 				r.Log.Info("reaper instance not found", "reaper", reaperKey)
 				return ctrl.Result{RequeueAfter: longDelay}, nil
 			} else {
+				r.Recorder.Event(reaperInstance, corev1.EventTypeWarning, "Find", fmt.Sprintf("Failed to retrieve reaper instance: %v", reaperKey))
 				r.Log.Error(err, "failed to retrieve reaper instance", "reaper", reaperKey)
 				return ctrl.Result{RequeueAfter: shortDelay}, err
 			}
@@ -121,6 +126,7 @@ func (r *CassandraDatacenterReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 		reaperSvc := reaper.Name + "-reaper-service" + "." + reaper.Namespace
 		restClient, err := reapergo.NewReaperClient(fmt.Sprintf("http://%s:8080", reaperSvc))
 		if err != nil {
+			r.Recorder.Event(reaper, corev1.EventTypeWarning, "Client", fmt.Sprintf("Failed to create client to access Reaper"))
 			r.Log.Error(err, "failed to create reaper rest client", "reaperService", reaperSvc)
 			return ctrl.Result{RequeueAfter: shortDelay}, err
 		}
@@ -132,8 +138,10 @@ func (r *CassandraDatacenterReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 			// Reaper's status. We still requeue the request to periodically check that
 			// the cluster has not be removed from Reaper.
 			if err = statusManager.AddClusterToStatus(ctx, reaper, cassdc); err == nil {
+				r.Recorder.Event(reaper, corev1.EventTypeNormal, "Add", fmt.Sprintf("Added %s to cluster status", cassdc.ClusterName))
 				return ctrl.Result{RequeueAfter: statusCheckDelay}, nil
 			} else {
+				r.Recorder.Event(reaper, corev1.EventTypeWarning, "Add", fmt.Sprintf("Failed to add %s to cluster status", cassdc.ClusterName))
 				r.Log.Error(err, "failed to re-add cluster in reaper status", "reaper", reaperKey)
 				return ctrl.Result{RequeueAfter: shortDelay}, err
 			}
@@ -143,12 +151,15 @@ func (r *CassandraDatacenterReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 			r.Log.Info("registering cluster with reaper", "reaper", reaperKey)
 			if err = restClient.AddCluster(ctx, cassdc.Spec.ClusterName, cassdc.GetDatacenterServiceName()); err == nil {
 				if err = statusManager.AddClusterToStatus(ctx, reaper, cassdc); err == nil {
+					r.Recorder.Event(reaper, corev1.EventTypeNormal, "Add", fmt.Sprintf("Added %s to cluster status", cassdc.ClusterName))
 					return ctrl.Result{RequeueAfter: statusCheckDelay}, nil
 				} else {
+					r.Recorder.Event(reaper, corev1.EventTypeWarning, "Add", fmt.Sprintf("Failed to add %s to cluster status", cassdc.ClusterName))
 					r.Log.Error(err, "failed to add cluster in reaper status", "reaper", reaperKey)
 					return ctrl.Result{RequeueAfter: shortDelay}, err
 				}
 			} else {
+				r.Recorder.Event(reaper, corev1.EventTypeWarning, "Add", fmt.Sprintf("Failed to register cluster %s to reaper", cassdc.ClusterName))
 				r.Log.Error(err, "failed to register cluster with reaper", "reaper", reaperKey)
 				return ctrl.Result{RequeueAfter: shortDelay}, err
 			}

@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"k8s.io/client-go/tools/record"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -42,6 +43,7 @@ type ReaperReconciler struct {
 	DeploymentReconciler reconcile.DeploymentReconciler
 	SchemaReconciler     reconcile.SchemaReconciler
 	Validator            config.Validator
+	Recorder             record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=reaper.cassandra-reaper.io,namespace="reaper-operator",resources=reapers,verbs=get;list;watch;create;update;patch;delete
@@ -81,7 +83,7 @@ func (r *ReaperReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	reaperReq := reconcile.ReaperRequest{Reaper: instance, Logger: reqLogger, StatusManager: statusManager}
+	reaperReq := reconcile.ReaperRequest{Reaper: instance, Logger: reqLogger, StatusManager: statusManager, Recorder: r.Recorder}
 
 	if result, err := r.ServiceReconciler.ReconcileService(ctx, reaperReq); result != nil {
 		return *result, err

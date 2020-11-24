@@ -3,6 +3,7 @@ package reconcile
 import (
 	"context"
 	"fmt"
+	"k8s.io/client-go/tools/record"
 	"time"
 
 	cassdcapi "github.com/datastax/cass-operator/operator/pkg/apis/cassandra/v1beta1"
@@ -37,6 +38,8 @@ type ReaperRequest struct {
 	Logger logr.Logger
 
 	StatusManager *status.StatusManager
+
+	Recorder record.EventRecorder
 }
 
 type ServiceReconciler interface {
@@ -99,12 +102,14 @@ func (r *defaultReconciler) ReconcileService(ctx context.Context, req ReaperRequ
 
 		req.Logger.Info("creating service", "service", key)
 		if err = r.Client.Create(ctx, service); err != nil {
+			req.Recorder.Event(service, corev1.EventTypeWarning, "Service", fmt.Sprintf("Failed to create service"))
 			req.Logger.Error(err, "failed to create service", "service", key)
 			return &ctrl.Result{Requeue: true, RequeueAfter: 10 * time.Second}, err
 		}
 
 		return nil, nil
 	} else if err != nil {
+		req.Recorder.Event(service, corev1.EventTypeWarning, "Service", fmt.Sprintf("Failed to fetch service details"))
 		req.Logger.Error(err, "failed to get service", "service", key)
 		return &ctrl.Result{Requeue: true, RequeueAfter: 10 * time.Second}, err
 	}
@@ -176,15 +181,18 @@ func (r *defaultReconciler) ReconcileSchema(ctx context.Context, req ReaperReque
 		req.Logger.Info("schema job not finished", "job", key)
 		return &ctrl.Result{Requeue: true, RequeueAfter: 5 * time.Second}, nil
 	} else if jobFailed(schemaJob) {
+		req.Recorder.Event(schemaJob, corev1.EventTypeWarning, "Schema", fmt.Sprintf("Schema job failed. Retrying"))
 		req.Logger.Info("schema job failed. deleting it so can be recreated to try again.", "job", key)
 		if err = r.Delete(ctx, schemaJob); err == nil {
 			return &ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		} else {
+			req.Recorder.Event(schemaJob, corev1.EventTypeWarning, "Schema", fmt.Sprintf("Failed to delete schema job."))
 			req.Logger.Error(err, "failed to delete schema job", "job", key)
 			return &ctrl.Result{RequeueAfter: 5 * time.Second}, err
 		}
 	} else {
 		// the job completed successfully
+		req.Recorder.Event(schemaJob, corev1.EventTypeNormal, "Schema", fmt.Sprintf("Schema job completed."))
 		req.Logger.Info("schema job completed successfully", "job", key)
 		return nil, nil
 	}
@@ -250,6 +258,7 @@ func (r *defaultReconciler) createSchemaJob(ctx context.Context, schemaJob *v1ba
 	}
 	req.Logger.Info("creating schema job", "job", key)
 	if err := r.Client.Create(ctx, schemaJob); err != nil {
+		req.Recorder.Event(schemaJob, corev1.EventTypeWarning, "Schema", fmt.Sprintf("Failed to create schema job"))
 		req.Logger.Error(err, "failed to create schema job", "job", key)
 		return &ctrl.Result{Requeue: true, RequeueAfter: 10 * time.Second}, err
 	} else {
@@ -344,10 +353,12 @@ func (r *defaultReconciler) ReconcileDeployment(ctx context.Context, req ReaperR
 			}
 
 			if err = r.Create(ctx, desiredDeployment); err != nil {
+				req.Recorder.Event(deployment, corev1.EventTypeWarning, "Deployment", fmt.Sprintf("Failed to create deployment"))
 				req.Logger.Error(err, "failed to create deployment", "deployment", key)
 			}
 			return &ctrl.Result{RequeueAfter: 10 * time.Second}, err
 		} else {
+			req.Recorder.Event(deployment, corev1.EventTypeWarning, "Deployment", fmt.Sprintf("Failed to get deployment"))
 			req.Logger.Error(err, "failed to get deployment", "deployment", key)
 			return &ctrl.Result{RequeueAfter: 10 * time.Second}, err
 		}
@@ -378,6 +389,7 @@ func (r *defaultReconciler) ReconcileDeployment(ctx context.Context, req ReaperR
 			deployment.Spec.Strategy = desiredDeployment.Spec.Strategy
 
 			if err = r.Update(ctx, deployment); err != nil {
+				req.Recorder.Event(deployment, corev1.EventTypeWarning, "Deployment", fmt.Sprintf("Failed to update deployment parameters"))
 				req.Logger.Error(err, "failed to update deployment", "deployment", deployment)
 			}
 			return &ctrl.Result{RequeueAfter: 10 * time.Second}, err
@@ -385,14 +397,17 @@ func (r *defaultReconciler) ReconcileDeployment(ctx context.Context, req ReaperR
 
 		if isDeploymentReady(deployment) {
 			if err := req.StatusManager.SetReady(ctx, reaper); err == nil {
+				req.Recorder.Event(reaper, corev1.EventTypeNormal, "Deployment", fmt.Sprintf("Reaper is ready"))
 				return nil, nil
 			} else {
+				req.Recorder.Event(reaper, corev1.EventTypeNormal, "Deployment", fmt.Sprintf("Reaper is ready, failed to update status"))
 				req.Logger.Error(err, "failed to update status")
 				return &ctrl.Result{RequeueAfter: 10 * time.Second}, err
 			}
 		} else {
 			req.Logger.Info("deployment not ready", "deployment", key)
 			if err := req.StatusManager.SetNotReady(ctx, reaper); err != nil {
+				req.Recorder.Event(reaper, corev1.EventTypeNormal, "Deployment", fmt.Sprintf("Reaper is not ready and failed to update status"))
 				req.Logger.Error(err, "deployment is not ready, failed to update reaper status", "deployment", key)
 				return &ctrl.Result{RequeueAfter: 10 * time.Second}, err
 			}
@@ -415,6 +430,7 @@ func (r *defaultReconciler) buildNewDeployment(req ReaperRequest) (*appsv1.Deplo
 	if len(reaper.Spec.ServerConfig.JmxUserSecretName) > 0 {
 		secret, err := r.getSecret(types.NamespacedName{Namespace: reaper.Namespace, Name: reaper.Spec.ServerConfig.JmxUserSecretName})
 		if err != nil {
+			req.Recorder.Event(reaper, corev1.EventTypeWarning, "Secret", fmt.Sprintf("Failed to get jmxUserSecret"))
 			req.Logger.Error(err, "failed to get jmxUserSecret", "deployment", key)
 			return nil, err
 		}
@@ -422,6 +438,7 @@ func (r *defaultReconciler) buildNewDeployment(req ReaperRequest) (*appsv1.Deplo
 		if usernameEnvVar, passwordEnvVar, err := r.secretsManager.GetJmxAuthCredentials(secret); err == nil {
 			addJmxAuthEnvVars(deployment, usernameEnvVar, passwordEnvVar)
 		} else {
+			req.Recorder.Event(reaper, corev1.EventTypeWarning, "Secret", fmt.Sprintf("Failed to get JMX credentials"))
 			req.Logger.Error(err, "failed to get JMX credentials", "deployment", key)
 			return nil, err
 		}

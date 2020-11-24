@@ -97,6 +97,7 @@ var _ = BeforeSuite(func(done Done) {
 		DeploymentReconciler: reconcile.GetDeploymentReconciler(),
 		SchemaReconciler:     reconcile.GetSchemaReconciler(),
 		Validator:            config.NewValidator(),
+		Recorder:             k8sManager.GetEventRecorderFor("reaper-controller"),
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
